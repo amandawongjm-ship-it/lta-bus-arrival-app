@@ -564,3 +564,88 @@ export function getSimulatedArrivals(stopCode: string, referenceTime: number = D
     };
   });
 }
+
+/**
+ * Fetches live LTA DataMall bus arrival times from the serverless /api/busarrival endpoint.
+ * Gracefully falls back to simulated arrivals if network is unavailable.
+ */
+export async function fetchLtaBusArrivals(
+  stopCode: string,
+  serviceNo?: string
+): Promise<{ arrivals: BusServiceArrival[]; isLive: boolean; source: string }> {
+  try {
+    const url = `/api/busarrival?BusStopCode=${encodeURIComponent(stopCode)}${
+      serviceNo ? `&ServiceNo=${encodeURIComponent(serviceNo)}` : ''
+    }`;
+    const response = await fetch(url);
+    if (!response.ok) {
+      throw new Error(`API returned HTTP ${response.status}`);
+    }
+
+    const data = await response.json();
+    if (!data.Services || !Array.isArray(data.Services)) {
+      return {
+        arrivals: getSimulatedArrivals(stopCode),
+        isLive: false,
+        source: data.source || 'simulated',
+      };
+    }
+
+    const now = Date.now();
+    const mapLtaBus = (bus: any) => {
+      if (!bus || !bus.EstimatedArrival) return null;
+      const arrivalMs = new Date(bus.EstimatedArrival).getTime();
+      const secondsRemaining = Math.max(0, Math.round((arrivalMs - now) / 1000));
+      let formattedTime = '';
+      if (secondsRemaining <= 45) {
+        formattedTime = 'Arr';
+      } else if (secondsRemaining < 60) {
+        formattedTime = '1m';
+      } else {
+        formattedTime = `${Math.round(secondsRemaining / 60)}m`;
+      }
+
+      return {
+        estimatedArrival: bus.EstimatedArrival,
+        secondsRemaining,
+        formattedTime,
+        load: (bus.Load as BusLoad) || 'SEA',
+        type: (bus.Type as BusType) || 'SD',
+        feature: (bus.Feature as BusFeature) || '',
+        plateNumber: bus.Latitude ? `SG${Math.abs(Math.round(parseFloat(bus.Latitude) * 10000)) % 9000 + 1000}` : 'SG8821B',
+      };
+    };
+
+    const arrivals: BusServiceArrival[] = data.Services.map((svc: any) => {
+      const meta = SERVICE_METADATA[svc.ServiceNo] || {
+        destination: 'Terminal Loop',
+        destinationCode: '00000',
+        category: 'Trunk' as const,
+      };
+
+      return {
+        serviceNo: svc.ServiceNo,
+        operator: (svc.Operator as BusOperator) || 'SBST',
+        destinationCode: svc.NextBus?.DestinationCode || meta.destinationCode,
+        destinationName: meta.destination,
+        category: meta.category,
+        nextBus: mapLtaBus(svc.NextBus),
+        nextBus2: mapLtaBus(svc.NextBus2),
+        nextBus3: mapLtaBus(svc.NextBus3),
+      };
+    });
+
+    return {
+      arrivals: arrivals.length > 0 ? arrivals : getSimulatedArrivals(stopCode),
+      isLive: Boolean(data.isLive),
+      source: data.source || 'lta_datamall',
+    };
+  } catch {
+    return {
+      arrivals: getSimulatedArrivals(stopCode),
+      isLive: false,
+      source: 'simulated_fallback',
+    };
+  }
+}
+
